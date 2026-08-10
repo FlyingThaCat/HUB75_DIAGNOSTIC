@@ -311,6 +311,16 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
   void startScan() async {
     if (_adapterState != BluetoothAdapterState.on) return;
     if (isScanning) return;
+
+    // Request Android runtime permissions if needed
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        await FlutterBluePlus.turnOn();
+      } catch (e) {
+        debugPrint("Turn on / permission warning: $e");
+      }
+    }
+
     setState(() {
       isScanning = true;
       scanResults.clear();
