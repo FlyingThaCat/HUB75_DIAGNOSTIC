@@ -366,7 +366,7 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
   Future<void> connectToDevice(BluetoothDevice device) async {
     await FlutterBluePlus.stopScan();
     try {
-      await device.connect(timeout: const Duration(seconds: 15));
+      await device.connect(timeout: const Duration(seconds: 15), license: License.nonprofit);
       List<BluetoothService> services = await device.discoverServices();
       
       BluetoothService? targetService = services.firstWhere(
@@ -642,7 +642,7 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
       return;
     }
 
-    FilePickerResult? result = await FilePicker.platform.pickFiles(
+    FilePickerResult? result = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['bin'],
     );
@@ -726,12 +726,18 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
               ),
               if (isConnected)
                 macos.ToolBarIconButton(
-                  label: isOtaUnlocked ? 'Unlocked' : 'Locked',
-                  icon: macos.MacosIcon(isOtaUnlocked ? CupertinoIcons.lock_open : CupertinoIcons.lock),
+                  label: 'Disconnect',
+                  icon: macos.MacosIcon(CupertinoIcons.xmark_circle),
                   showLabel: false,
                   onPressed: () {
-                    sendCommand(isOtaUnlocked ? "ota_lock" : "ota_unlock");
-                    setState(() => isOtaUnlocked = !isOtaUnlocked);
+                    targetDevice?.disconnect();
+                    setState(() {
+                      isConnected = false;
+                      targetDevice = null;
+                      cmdChar = null;
+                      otaChar = null;
+                      btnChar = null;
+                    });
                   },
                 ),
             ],
@@ -1002,18 +1008,44 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
                     spacing: 8,
                     runSpacing: 8,
                     children: [
-                      ElevatedButton.icon(
-                        onPressed: isFlashing ? null : () => fetchAndFlashGitHubFirmware(isBeta: true),
-                        icon: const Icon(Icons.cloud_download),
-                        label: Text(isFlashing ? "Flashing ${(otaProgress * 100).toStringAsFixed(1)}%" : "Auto Update Firmware (GitHub)"),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: isOtaUnlocked ? Colors.cyan : Colors.grey,
+                      GestureDetector(
+                        onLongPress: isFlashing
+                            ? null
+                            : () {
+                                showCupertinoModalPopup<void>(
+                                  context: context,
+                                  builder: (popupContext) => CupertinoActionSheet(
+                                    title: const Text('Firmware Options'),
+                                    message: const Text('Choose a local .bin file to flash or cancel.'),
+                                    actions: [
+                                      CupertinoActionSheetAction(
+                                        onPressed: () {
+                                          Navigator.of(popupContext).pop();
+                                          uploadFirmwareOTA();
+                                        },
+                                        child: const Text('Pick Local (.bin)'),
+                                      ),
+                                    ],
+                                    cancelButton: CupertinoActionSheetAction(
+                                      isDefaultAction: true,
+                                      onPressed: () => Navigator.of(popupContext).pop(),
+                                      child: const Text('Cancel'),
+                                    ),
+                                  ),
+                                );
+                              },
+                        child: CupertinoButton(
+                          onPressed: isFlashing ? null : () => fetchAndFlashGitHubFirmware(isBeta: true),
+                          color: isOtaUnlocked ? Colors.cyan : Colors.grey,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.cloud_download),
+                              const SizedBox(width: 8),
+                              Text(isFlashing ? "Flashing ${(otaProgress * 100).toStringAsFixed(1)}%" : "Auto Update Firmware (GitHub)"),
+                            ],
+                          ),
                         ),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: isFlashing ? null : uploadFirmwareOTA,
-                        icon: const Icon(Icons.folder_open),
-                        label: const Text("Pick Local (.bin)"),
                       ),
                     ],
                   ),
