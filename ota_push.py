@@ -8,7 +8,7 @@ SERVICE_UUID            = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 OTA_CHARACTERISTIC_UUID = "c8659210-af98-4360-91cc-8e2a10587822"
 CMD_CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"  # Command channel
 FIRMWARE_PATH           = ".pio/build/esp32dev/firmware.bin"
-CHUNK_SIZE              = 512
+CHUNK_SIZE              = 244
 
 
 # Find pio — works whether run from PlatformIO terminal or plain venv

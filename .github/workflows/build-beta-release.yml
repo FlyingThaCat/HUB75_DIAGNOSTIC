@@ -1,21 +1,28 @@
-name: Build & Release Beta Firmware
+name: CI/CD Build & Release (Firmware + Flutter App)
 
 on:
   push:
     branches:
       - main
       - master
+      - dev
+      - beta
+      - release
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build & Publish Beta Release
+  # ==========================================
+  # 1. BUILD ESP32 FIRMWARE VIA PLATFORMIO
+  # ==========================================
+  build-firmware:
+    name: Build ESP32 Firmware
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -28,45 +35,125 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade platformio
 
-      - name: Build Firmware Binary
-        run: |
-          pio run -e esp32dev
+      - name: Compile ESP32 Binary
+        run: pio run -e esp32dev
 
-      - name: Prepare Artifacts & Versioning
-        id: prep
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware
+          path: |
+            .pio/build/esp32dev/firmware.bin
+            ota_push.py
+
+  # ==========================================
+  # 2. BUILD FLUTTER APP (ANDROID & DESKTOP)
+  # ==========================================
+  build-flutter:
+    name: Build Flutter Apps
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java for Android Build
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Set up Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.x'
+          channel: 'stable'
+          cache: true
+
+      - name: Install Flutter Dependencies
         run: |
-          mkdir -p release_files
-          cp .pio/build/esp32dev/firmware.bin release_files/esp32_hub75_firmware_beta.bin
-          cp ota_push.py release_files/ota_push.py
-          
-          # Automatic timestamp-based version tag (e.g. v1.0.0-beta-20260810-190520)
-          TAG_NAME="v1.0.0-beta-$(date +'%Y%m%d-%H%M%S')"
-          RELEASE_NAME="HUB75 Matrix Diagnostic Beta Build (${TAG_NAME})"
+          cd hub75_diagnostic_app
+          flutter pub get
+
+      - name: Build Android APK
+        run: |
+          cd hub75_diagnostic_app
+          flutter build apk --release
+
+      - name: Upload Flutter Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-app-android
+          path: hub75_diagnostic_app/build/app/outputs/flutter-apk/app-release.apk
+
+  # ==========================================
+  # 3. PUBLISH GITHUB RELEASE (BETA OR STABLE)
+  # ==========================================
+  release:
+    name: Publish Release to GitHub
+    needs: [build-firmware, build-flutter]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download ESP32 Firmware Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: esp32-firmware
+          path: release_assets/firmware
+
+      - name: Download Flutter Android Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flutter-app-android
+          path: release_assets/app
+
+      - name: Determine Branch & Release Type
+        id: release_info
+        run: |
+          REF="${{ github.ref }}"
+          DATE_STAMP="$(date +'%Y%m%d-%H%M%S')"
+
+          if [[ "$REF" == refs/heads/main || "$REF" == refs/heads/release || "$REF" == refs/tags/* ]]; then
+            # STABLE RELEASE
+            IS_PRERELEASE="false"
+            TAG_NAME="v1.0.0-stable-${DATE_STAMP}"
+            RELEASE_NAME="HUB75 Matrix Suite v1.0.0 Stable Release"
+          else
+            # BETA / DEV RELEASE
+            IS_PRERELEASE="true"
+            TAG_NAME="v1.0.0-beta-${DATE_STAMP}"
+            RELEASE_NAME="HUB75 Matrix Suite Beta Build (${TAG_NAME})"
+          fi
+
+          echo "is_prerelease=${IS_PRERELEASE}" >> $GITHUB_OUTPUT
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
           echo "release_name=${RELEASE_NAME}" >> $GITHUB_OUTPUT
 
-      - name: Publish Beta Release to GitHub
+          # Prepare cleanly named release files
+          mkdir -p release_final
+          cp release_assets/firmware/.pio/build/esp32dev/firmware.bin release_final/esp32_hub75_firmware.bin
+          cp release_assets/firmware/ota_push.py release_final/ota_push.py
+          cp release_assets/app/app-release.apk release_final/HUB75_Diagnostic_App.apk
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.prep.outputs.tag_name }}
-          name: ${{ steps.prep.outputs.release_name }}
-          prerelease: true
+          tag_name: ${{ steps.prep.outputs.tag_name || steps.release_info.outputs.tag_name }}
+          name: ${{ steps.release_info.outputs.release_name }}
+          prerelease: ${{ steps.release_info.outputs.is_prerelease == 'true' }}
           draft: false
           files: |
-            release_files/esp32_hub75_firmware_beta.bin
-            release_files/ota_push.py
+            release_final/esp32_hub75_firmware.bin
+            release_final/ota_push.py
+            release_final/HUB75_Diagnostic_App.apk
           body: |
-            ### 🚀 Automated Beta Release
-            This release was automatically built on push to `main` branch.
+            ## HUB75 Matrix Controller & Diagnostic Suite Release
 
-            #### Download Files:
-            - **`esp32_hub75_firmware_beta.bin`**: Ready-to-flash ESP32 firmware binary.
-            - **`ota_push.py`**: High-speed BLE Over-The-Air deployment script.
-
-            #### Quick Flash via BLE:
-            ```bash
-            pip install bleak
-            python ota_push.py
-            ```
+            ### Assets Included:
+            - **`HUB75_Diagnostic_App.apk`**: Android Companion App.
+            - **`esp32_hub75_firmware.bin`**: ESP32 Firmware Binary.
+            - **`ota_push.py`**: Python BLE Over-The-Air deployment script.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

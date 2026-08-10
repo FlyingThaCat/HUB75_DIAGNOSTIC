@@ -42,6 +42,7 @@ dependencies:
   fluent_ui: ^4.16.1
   yaru: ^10.2.0
   shared_preferences: ^2.5.5
+  http: ^1.2.1
 dev_dependencies:
   flutter_test:
     sdk: flutter

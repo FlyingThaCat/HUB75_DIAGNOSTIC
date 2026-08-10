@@ -10,12 +10,17 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fluent_ui/fluent_ui.dart' as fluent;
 import 'package:macos_ui/macos_ui.dart' as macos;
 import 'package:yaru/yaru.dart' as yaru;
+import 'package:http/http.dart' as http;
 
 const String serviceUuid = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 const String otaCharUuid = "c8659210-af98-4360-91cc-8e2a10587822";
 const String cmdCharUuid = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 const String verCharUuid = "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d";
 const String btnCharUuid = "5c6d7e8f-9a0b-1c2d-3e4f-5a6b7c8d9e0f";
+
+// GitHub Repository for automated release fetching
+const String githubRepo = "FlyingThaCat/HUB75_DIAGNOSTIC";
+
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -107,6 +112,7 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
   void initState() {
     super.initState();
     checkWiringPopup();
+    checkForAppUpdates();
     // Listen for adapter state — scan only once BT is fully powered on
     _adapterStateSubscription = FlutterBluePlus.adapterState.listen((state) {
       if (!mounted) return;
@@ -115,6 +121,91 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
         startScan();
       }
     });
+  }
+
+  void checkForAppUpdates() async {
+    try {
+      final url = 'https://api.github.com/repos/$githubRepo/releases';
+      final res = await http.get(Uri.parse(url));
+
+      if (res.statusCode == 200) {
+        List releases = jsonDecode(res.body);
+        if (releases.isEmpty) return;
+
+        // Get latest release (including pre-releases)
+        var latestRelease = releases.first;
+        String latestTag = latestRelease['tag_name'] ?? '';
+        List assets = latestRelease['assets'] ?? [];
+
+        var apkAsset = assets.firstWhere(
+          (a) => (a['name'] as String).endsWith('.apk'),
+          orElse: () => null,
+        );
+
+        if (apkAsset != null && mounted) {
+          String apkDownloadUrl = apkAsset['browser_download_url'];
+          String releaseNotes = latestRelease['body'] ?? 'New version available on GitHub.';
+
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _showAppUpdateDialog(latestTag, apkDownloadUrl, releaseNotes);
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint("App update check skipped: $e");
+    }
+  }
+
+  void _showAppUpdateDialog(String tag, String apkUrl, String notes) {
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: Row(
+          children: [
+            const Icon(Icons.system_update, color: Colors.cyanAccent),
+            const SizedBox(width: 8),
+            Expanded(child: Text("App Update Available ($tag)")),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "A new version of the HUB75 Diagnostic App is available on GitHub!",
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.black38,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                notes.length > 200 ? "${notes.substring(0, 200)}..." : notes,
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(),
+            child: const Text("Later"),
+          ),
+          ElevatedButton.icon(
+            onPressed: () async {
+              Navigator.of(dialogCtx).pop();
+              _showNotification("Direct APK Download URL copied to clipboard or downloading...");
+            },
+            icon: const Icon(Icons.download),
+            label: const Text("Download APK"),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.cyan),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -302,6 +393,19 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
       }
 
 
+      // Listen for unexpected disconnects
+      device.connectionState.listen((state) {
+        if (state == BluetoothConnectionState.disconnected && mounted) {
+          setState(() {
+            isConnected = false;
+            targetDevice = null;
+            cmdChar = null;
+            otaChar = null;
+            btnChar = null;
+          });
+        }
+      });
+
       if (mounted) {
         setState(() {
           targetDevice = device;
@@ -317,7 +421,11 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
 
   void sendCommand(String cmd) async {
     if (cmdChar != null && isConnected) {
-      await cmdChar!.write(utf8.encode(cmd), withoutResponse: true);
+      try {
+        await cmdChar!.write(utf8.encode(cmd), withoutResponse: true);
+      } catch (e) {
+        debugPrint("sendCommand error: $e");
+      }
     }
   }
 
@@ -478,6 +586,43 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
   }
 
 
+  /// Flash raw binary bytes over BLE OTA
+  Future<void> _flashBytes(List<int> bytes) async {
+    if (otaChar == null) return;
+    setState(() {
+      isFlashing = true;
+      otaProgress = 0.0;
+    });
+
+    String startCmd = "START:${bytes.length}";
+    await otaChar!.write(utf8.encode(startCmd), withoutResponse: false);
+    await Future.delayed(const Duration(milliseconds: 300));
+
+    int chunkSize = 244;
+    for (int i = 0; i < bytes.length; i += chunkSize) {
+      int end = (i + chunkSize < bytes.length) ? i + chunkSize : bytes.length;
+      List<int> chunk = bytes.sublist(i, end);
+      await otaChar!.write(chunk, withoutResponse: false);
+
+      if (i % (chunkSize * 20) == 0 && mounted) {
+        setState(() {
+          otaProgress = (i / bytes.length);
+        });
+      }
+    }
+
+    await otaChar!.write(utf8.encode("END"), withoutResponse: false);
+
+    if (mounted) {
+      setState(() {
+        otaProgress = 1.0;
+        isFlashing = false;
+      });
+
+      _showNotification("OTA Firmware Upload Complete! ESP32 is rebooting...");
+    }
+  }
+
   void uploadFirmwareOTA() async {
     if (!isOtaUnlocked) {
       _showNotification(
@@ -495,39 +640,63 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
     if (result != null && result.files.single.path != null && otaChar != null) {
       File binFile = File(result.files.single.path!);
       List<int> bytes = await binFile.readAsBytes();
+      await _flashBytes(bytes);
+    }
+  }
 
-      setState(() {
-        isFlashing = true;
-        otaProgress = 0.0;
-      });
+  /// Automatically fetch the latest firmware binary from GitHub Releases (Stable or Beta)
+  void fetchAndFlashGitHubFirmware({bool isBeta = false}) async {
+    if (!isOtaUnlocked) {
+      _showNotification(
+        "OTA is LOCKED! Press physical BOOT button while on OTA Update Screen first.",
+        color: Colors.amber,
+      );
+      return;
+    }
 
-      String startCmd = "START:${bytes.length}";
-      await otaChar!.write(utf8.encode(startCmd), withoutResponse: false);
-      await Future.delayed(const Duration(milliseconds: 300));
+    _showNotification("Fetching latest ${isBeta ? 'Beta' : 'Stable'} firmware from GitHub...");
 
-      int chunkSize = 512;
-      for (int i = 0; i < bytes.length; i += chunkSize) {
-        int end = (i + chunkSize < bytes.length) ? i + chunkSize : bytes.length;
-        List<int> chunk = bytes.sublist(i, end);
-        await otaChar!.write(chunk, withoutResponse: false);
+    try {
+      final url = isBeta
+          ? 'https://api.github.com/repos/$githubRepo/releases'
+          : 'https://api.github.com/repos/$githubRepo/releases/latest';
 
-        if (i % (chunkSize * 20) == 0 && mounted) {
-          setState(() {
-            otaProgress = (i / bytes.length);
-          });
+      final res = await http.get(Uri.parse(url));
+
+      if (res.statusCode == 200) {
+        dynamic releaseData;
+        if (isBeta) {
+          List releases = jsonDecode(res.body);
+          releaseData = releases.firstWhere((r) => r['prerelease'] == true, orElse: () => releases.first);
+        } else {
+          releaseData = jsonDecode(res.body);
         }
+
+        List assets = releaseData['assets'] ?? [];
+        var binAsset = assets.firstWhere(
+          (a) => (a['name'] as String).endsWith('.bin'),
+          orElse: () => null,
+        );
+
+        if (binAsset != null && binAsset['browser_download_url'] != null) {
+          String downloadUrl = binAsset['browser_download_url'];
+          _showNotification("Downloading ${binAsset['name']}...");
+
+          final binRes = await http.get(Uri.parse(downloadUrl));
+          if (binRes.statusCode == 200) {
+            _showNotification("Download Complete! Starting BLE OTA Flash...");
+            await _flashBytes(binRes.bodyBytes);
+          } else {
+            _showNotification("Failed to download firmware binary (${binRes.statusCode})");
+          }
+        } else {
+          _showNotification("No .bin asset found in the latest GitHub release!");
+        }
+      } else {
+        _showNotification("GitHub release fetch failed (${res.statusCode})");
       }
-
-      await otaChar!.write(utf8.encode("END"), withoutResponse: false);
-
-      if (mounted) {
-        setState(() {
-          otaProgress = 1.0;
-          isFlashing = false;
-        });
-
-        _showNotification("OTA Firmware Upload Complete! ESP32 is rebooting...");
-      }
+    } catch (e) {
+      _showNotification("GitHub fetch error: $e");
     }
   }
 
@@ -819,13 +988,24 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
                   const SizedBox(height: 12),
                   if (isFlashing) LinearProgressIndicator(value: otaProgress),
                   const SizedBox(height: 8),
-                  ElevatedButton.icon(
-                    onPressed: isFlashing ? null : uploadFirmwareOTA,
-                    icon: const Icon(Icons.upload_file),
-                    label: Text(isFlashing ? "Flashing ${(otaProgress * 100).toStringAsFixed(1)}%" : "Pick & Flash Firmware (.bin)"),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: isOtaUnlocked ? Colors.green : Colors.grey,
-                    ),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: isFlashing ? null : () => fetchAndFlashGitHubFirmware(isBeta: true),
+                        icon: const Icon(Icons.cloud_download),
+                        label: Text(isFlashing ? "Flashing ${(otaProgress * 100).toStringAsFixed(1)}%" : "Auto Update Firmware (GitHub)"),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: isOtaUnlocked ? Colors.cyan : Colors.grey,
+                        ),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: isFlashing ? null : uploadFirmwareOTA,
+                        icon: const Icon(Icons.folder_open),
+                        label: const Text("Pick Local (.bin)"),
+                      ),
+                    ],
                   ),
                 ],
               ),
