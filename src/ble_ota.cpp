@@ -16,6 +16,7 @@ unsigned long otaRebootTimer = 0;
 static bool g_otaEnabled = false;
 
 static BLECharacteristic *pBtnCharacteristic = nullptr;
+static BLEServer *pServerInstance = nullptr;
 
 void setOtaEnabled(bool enabled) {
     g_otaEnabled = enabled;
@@ -192,6 +193,13 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
                 }
             }
 
+            // 6. Force Temporary BLE Disconnect (Format: "disconnect")
+            else if (command == "disconnect") {
+                Serial.println("App requested temporary BLE disconnect. Disconnecting client...");
+                if (pServerInstance != nullptr) {
+                    pServerInstance->disconnect(pServerInstance->getConnId());
+                }
+            }
 
             // Force screen refresh for the new state/color
             stateNeedsInit = true; 
@@ -226,11 +234,23 @@ static ServerCallbacks serverCallbacks;
 void setupBLE() {
     Serial.println("Initializing BLE for OTA Update & Control...");
 
-    BLEDevice::init("ESP32_HUB75_DIAGNOSTIC");
+    // Generate unique hardware fingerprint from ESP32 eFuse MAC address
+    uint64_t chipid = ESP.getEfuseMac();
+    char serialNo[16];
+    snprintf(serialNo, sizeof(serialNo), "%04X%08X", (uint16_t)(chipid >> 32), (uint32_t)chipid);
+
+    char devName[32];
+    snprintf(devName, sizeof(devName), "ESP32_HUB75_%04X", (uint16_t)(chipid & 0xFFFF));
+
+    Serial.printf("Device Serial Number / Fingerprint: %s\n", serialNo);
+    Serial.printf("Advertising Name: %s\n", devName);
+
+    BLEDevice::init(devName);
     BLEDevice::setMTU(512);
     esp_ble_gap_config_local_icon(0x04C0); // Prevent iOS heart-sensor category bug
 
     BLEServer *pServer = BLEDevice::createServer();
+    pServerInstance = pServer;
     pServer->setCallbacks(&serverCallbacks);
 
     BLEService *pService = pServer->createService(BLE_SERVICE_UUID);
@@ -252,12 +272,14 @@ void setupBLE() {
     );
     pCmdCharacteristic->setCallbacks(&cmdCallbacks);
 
-    // 3. Firmware Version Check Characteristic (Read-Only)
+    // 3. Firmware Version & Serial Number Characteristic (Read-Only)
     BLECharacteristic *pVerCharacteristic = pService->createCharacteristic(
         BLE_VER_CHAR_UUID,
         BLECharacteristic::PROPERTY_READ
     );
-    pVerCharacteristic->setValue(FIRMWARE_VERSION);
+    char verBuf[64];
+    snprintf(verBuf, sizeof(verBuf), "%s|SN:%s", FIRMWARE_VERSION, serialNo);
+    pVerCharacteristic->setValue(verBuf);
 
     // 4. Button Event Notification Characteristic (Notify)
     pBtnCharacteristic = pService->createCharacteristic(
@@ -272,15 +294,15 @@ void setupBLE() {
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
 
     // Primary advertisement packet (max 31 bytes):
-    // Service UUID-128 = 18 bytes — fits cleanly, no overflow
+    // Service UUID-128 = 18 bytes — fits cleanly
     BLEAdvertisementData oAdvertisementData;
     oAdvertisementData.setCompleteServices(BLEUUID(BLE_SERVICE_UUID));
     pAdvertising->setAdvertisementData(oAdvertisementData);
 
     // Scan response packet (max 31 bytes):
-    // Name "ESP32_HUB75_DIAGNOSTIC" = 23 bytes — fits cleanly here
+    // Device name with unique suffix (e.g. ESP32_HUB75_1650)
     BLEAdvertisementData oScanResponseData;
-    oScanResponseData.setName("ESP32_HUB75_DIAGNOSTIC");
+    oScanResponseData.setName(devName);
     pAdvertising->setScanResponseData(oScanResponseData);
 
     pAdvertising->setScanResponse(true);

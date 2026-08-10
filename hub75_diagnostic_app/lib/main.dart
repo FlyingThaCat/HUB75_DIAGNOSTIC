@@ -95,6 +95,7 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
   bool isScanning = false;
   bool isConnected = false;
   String fwVersion = "Unknown";
+  String deviceSerialNumber = "Unknown";
   String lastBtnEvent = "No Events Yet";
   bool isOtaUnlocked = false;
   double otaProgress = 0.0;
@@ -380,7 +381,15 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
         if (uuid == btnCharUuid) btnChar = c;
         if (uuid == verCharUuid) {
           var val = await c.read();
-          fwVersion = utf8.decode(val);
+          String rawVer = utf8.decode(val);
+          if (rawVer.contains("|SN:")) {
+            var parts = rawVer.split("|SN:");
+            fwVersion = parts[0];
+            deviceSerialNumber = parts[1];
+          } else {
+            fwVersion = rawVer;
+            deviceSerialNumber = "Unknown";
+          }
         }
       }
 
@@ -425,6 +434,29 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
     } catch (e) {
       if (mounted) {
         _showNotification("Connection failed: $e");
+      }
+    }
+  }
+
+  /// Temporarily disconnect current device without turning off Bluetooth adapter
+  Future<void> disconnectDevice() async {
+    if (isConnected && targetDevice != null) {
+      try {
+        // Send remote disconnect command to ESP32 to free connection
+        sendCommand("disconnect");
+        await targetDevice!.disconnect();
+      } catch (e) {
+        debugPrint("Disconnect error: $e");
+      }
+      if (mounted) {
+        setState(() {
+          isConnected = false;
+          targetDevice = null;
+          cmdChar = null;
+          otaChar = null;
+          btnChar = null;
+        });
+        _showNotification("Disconnected from device. Start scan to pair another.");
       }
     }
   }
@@ -885,15 +917,27 @@ class _NativeDashboardScreenState extends State<NativeDashboardScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text("Device: ${targetDevice?.platformName}", style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      Text("Serial Number: $deviceSerialNumber", style: const TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.w500)),
                       Text("Firmware Version: v$fwVersion", style: const TextStyle(color: Colors.grey)),
                       const SizedBox(height: 4),
                       Text("Button Event: $lastBtnEvent", style: const TextStyle(color: Colors.lightBlueAccent, fontWeight: FontWeight.w600)),
                     ],
                   ),
-                  Chip(
-                    label: Text(isOtaUnlocked ? "OTA Unlocked" : "OTA Locked"),
-                    backgroundColor: isOtaUnlocked ? Colors.green.withAlpha(50) : Colors.red.withAlpha(50),
-                    side: BorderSide(color: isOtaUnlocked ? Colors.green : Colors.red),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Chip(
+                        label: Text(isOtaUnlocked ? "OTA Unlocked" : "OTA Locked"),
+                        backgroundColor: isOtaUnlocked ? Colors.green.withAlpha(50) : Colors.red.withAlpha(50),
+                        side: BorderSide(color: isOtaUnlocked ? Colors.green : Colors.red),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: disconnectDevice,
+                        icon: const Icon(Icons.link_off, size: 16, color: Colors.redAccent),
+                        label: const Text("Disconnect", style: TextStyle(color: Colors.redAccent, fontSize: 12)),
+                      ),
+                    ],
                   )
                 ],
               ),
