@@ -76,7 +76,7 @@ jobs:
       - name: Build Android APK
         run: |
           cd hub75_diagnostic_app
-          flutter build apk --release
+          flutter build apk --release --no-tree-shake-icons
 
       - name: Upload Flutter Artifacts
         uses: actions/upload-artifact@v4
